@@ -1,0 +1,22 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Binaries
+bin/
+
+# Coverage
+coverage/
+
+# Dependency dirs (if vendoring)
+vendor/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
