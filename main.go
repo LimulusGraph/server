@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 // CacheMetadata stores last successful MD5 execution values
@@ -25,6 +28,10 @@ func main() {
 
 	http.HandleFunc("/api/project/load", enableCORS(handleLoadProject))
 	http.HandleFunc("/api/project/save", enableCORS(handleSaveProject))
+	http.HandleFunc("/api/project/init_temp", enableCORS(handleInitTempProject))
+	http.HandleFunc("/api/project/ensure_scripts", enableCORS(handleEnsureScripts))
+	http.HandleFunc("/api/project/relocate", enableCORS(handleRelocateProject))
+	http.HandleFunc("/api/health", enableCORS(handleHealth))
 	http.HandleFunc("/api/node/read_code", enableCORS(handleReadCode))
 	http.HandleFunc("/api/node/save_code", enableCORS(handleSaveCode))
 	http.HandleFunc("/api/node/run", enableCORS(handleRunNode))
@@ -34,6 +41,35 @@ func main() {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
+
+type RFWorkflow struct {
+	Nodes []RFNode `json:"nodes"`
+	Edges []RFEdge `json:"edges"`
+}
+
+type RFNode struct {
+	ID       string         `json:"id"`
+	Type     string         `json:"type"`
+	Position map[string]any `json:"position"`
+	Data     RFNodeData     `json:"data"`
+}
+
+type RFNodeData struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	ScriptPath  string `json:"scriptPath"`
+	Status      string `json:"status"`
+}
+
+type RFEdge struct {
+	ID     string         `json:"id"`
+	Source string         `json:"source"`
+	Target string         `json:"target"`
+	Data   map[string]any `json:"data"`
+	Style  map[string]any `json:"style"`
+}
+
+var nonWordRegexp = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 // CORS & Method Middleware
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
@@ -98,10 +134,8 @@ func handleSaveProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate JSON
-	var wf dag.Workflow
-	if err := json.Unmarshal(body, &wf); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON structure: %v", err), http.StatusBadRequest)
+	if !json.Valid(body) {
+		http.Error(w, "Invalid JSON structure", http.StatusBadRequest)
 		return
 	}
 
@@ -112,7 +146,7 @@ func handleSaveProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Pretty print save
-	prettyJSON, err := json.MarshalIndent(wf, "", "  ")
+	prettyJSON, err := json.MarshalIndent(json.RawMessage(body), "", "  ")
 	if err != nil {
 		http.Error(w, "JSON formatting failed", http.StatusInternalServerError)
 		return
@@ -125,6 +159,175 @@ func handleSaveProject(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"success"}`))
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
+func handleInitTempProject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tmpDir, err := os.MkdirTemp("", "limulus-project-*")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create temp project: %v", err), http.StatusInternalServerError)
+		return
+	}
+	projectPath := filepath.Join(tmpDir, "workflow.lmg")
+	if err := os.WriteFile(projectPath, []byte("{\"nodes\":[],\"edges\":[]}"), 0644); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to initialize temp project: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"project_path": projectPath})
+}
+
+func handleEnsureScripts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	projectPath := r.URL.Query().Get("project_path")
+	if projectPath == "" {
+		http.Error(w, "Missing 'project_path' query parameter", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+
+	updated, err := ensureScriptsForWorkflow(projectPath, body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(updated)
+}
+
+func handleRelocateProject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	fromPath := r.URL.Query().Get("from_path")
+	toPath := r.URL.Query().Get("to_path")
+	if fromPath == "" || toPath == "" {
+		http.Error(w, "Missing 'from_path' or 'to_path' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	updatedBody, err := ensureScriptsForWorkflow(fromPath, body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fromDir := filepath.Dir(fromPath)
+	toDir := filepath.Dir(toPath)
+	if err := os.MkdirAll(toDir, 0755); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create destination directory: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var wf RFWorkflow
+	if err := json.Unmarshal(updatedBody, &wf); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to parse workflow for relocation: %v", err), http.StatusInternalServerError)
+		return
+	}
+	for _, node := range wf.Nodes {
+		if node.Data.ScriptPath == "" {
+			continue
+		}
+		src := filepath.Join(fromDir, node.Data.ScriptPath)
+		dst := filepath.Join(toDir, node.Data.ScriptPath)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create destination script directory: %v", err), http.StatusInternalServerError)
+			return
+		}
+		b, err := os.ReadFile(src)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to read source script: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(dst, b, 0644); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to write destination script: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := os.WriteFile(toPath, updatedBody, 0644); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save relocated project: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(updatedBody)
+}
+
+func ensureScriptsForWorkflow(projectPath string, workflowBody []byte) ([]byte, error) {
+	projectDir := filepath.Dir(projectPath)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create project directory: %v", err)
+	}
+
+	var wf RFWorkflow
+	if err := json.Unmarshal(workflowBody, &wf); err != nil {
+		return nil, fmt.Errorf("failed to parse workflow: %v", err)
+	}
+
+	for i := range wf.Nodes {
+		scriptPath := strings.TrimSpace(wf.Nodes[i].Data.ScriptPath)
+		if scriptPath == "" {
+			scriptPath = filepath.ToSlash(filepath.Join("nodes", fmt.Sprintf("%s.py", sanitizeFilename(wf.Nodes[i].ID))))
+			wf.Nodes[i].Data.ScriptPath = scriptPath
+		}
+		fullScriptPath := filepath.Join(projectDir, scriptPath)
+		if err := os.MkdirAll(filepath.Dir(fullScriptPath), 0755); err != nil {
+			return nil, fmt.Errorf("failed creating script directory: %v", err)
+		}
+		if _, err := os.Stat(fullScriptPath); os.IsNotExist(err) {
+			defaultCode := ""
+			if err := os.WriteFile(fullScriptPath, []byte(defaultCode), 0644); err != nil {
+				return nil, fmt.Errorf("failed to create script file: %v", err)
+			}
+		}
+	}
+
+	out, err := json.Marshal(wf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize workflow: %v", err)
+	}
+	return out, nil
+}
+
+func sanitizeFilename(value string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	if trimmed == "" {
+		return "node"
+	}
+	cleaned := nonWordRegexp.ReplaceAllString(trimmed, "_")
+	cleaned = strings.Trim(cleaned, "_")
+	if cleaned == "" {
+		return "node"
+	}
+	return cleaned
 }
 
 // 3. Read specific script code
@@ -213,8 +416,8 @@ func handleRunNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var wf dag.Workflow
-	if err := json.Unmarshal(data, &wf); err != nil {
+	wf, err := decodeWorkflowToDag(data)
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Invalid workflow JSON: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -283,6 +486,10 @@ func handleRunNode(w http.ResponseWriter, r *http.Request) {
 
 		if nodeObj == nil {
 			streamLog("system", fmt.Sprintf("EXECUTION_ERROR: Node %s not found", qNodeID))
+			return
+		}
+		if strings.TrimSpace(nodeObj.ScriptPath) == "" {
+			streamLog("system", fmt.Sprintf("EXECUTION_ERROR: Node %s has no script path. Save or relink its script first.", qNodeID))
 			return
 		}
 
@@ -375,4 +582,58 @@ func handleRunNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	streamLog("system", "COMPLETED_SUCCESS")
+}
+
+func decodeWorkflowToDag(raw []byte) (dag.Workflow, error) {
+	var wf dag.Workflow
+	looksLikeDag := bytes.Contains(raw, []byte(`"script_path"`)) || bytes.Contains(raw, []byte(`"from"`))
+	if err := json.Unmarshal(raw, &wf); err == nil && len(wf.Nodes) > 0 && looksLikeDag {
+		return wf, nil
+	}
+
+	var rf RFWorkflow
+	if err := json.Unmarshal(raw, &rf); err != nil {
+		return dag.Workflow{}, err
+	}
+
+	var converted dag.Workflow
+	converted.Nodes = make([]dag.Node, 0, len(rf.Nodes))
+	converted.Edges = make([]dag.Edge, 0, len(rf.Edges))
+	for _, n := range rf.Nodes {
+		converted.Nodes = append(converted.Nodes, dag.Node{
+			ID:          n.ID,
+			Type:        n.Type,
+			Title:       n.Data.Title,
+			ScriptPath:  n.Data.ScriptPath,
+			Description: n.Data.Description,
+		})
+	}
+	for _, e := range rf.Edges {
+		disabled := false
+		if e.Data != nil {
+			if d, ok := e.Data["disabled"].(bool); ok {
+				disabled = d
+			}
+		}
+		converted.Edges = append(converted.Edges, dag.Edge{
+			ID:       e.ID,
+			From:     e.Source,
+			To:       e.Target,
+			FromPort: "out",
+			ToPort:   "in",
+			Disabled: disabled || edgeLooksDisabled(e.Style),
+		})
+	}
+	return converted, nil
+}
+
+func edgeLooksDisabled(style map[string]any) bool {
+	if style == nil {
+		return false
+	}
+	rawStroke, ok := style["stroke"].(string)
+	if !ok {
+		return false
+	}
+	return strings.Contains(rawStroke, "0.3")
 }
