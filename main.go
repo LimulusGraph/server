@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"limulus/server/dag"
+	"limulus/server/namespace"
 	"limulus/server/runner"
+	"limulus/server/storage"
 	"log"
 	"net/http"
 	"os"
@@ -549,9 +552,19 @@ func handleRunNode(w http.ResponseWriter, r *http.Request) {
 		logChan := make(chan runner.LogLine)
 		errChan := make(chan error, 1)
 
+		// Create namespace-aware runner
+		nsMgr := namespace.NewNamespaceManager()
+		cs := storage.NewCacheStorage(filepath.Join(projectDir, ".limulus_cache"))
+		if err := cs.EnsureDirectories(); err != nil {
+			errChan <- fmt.Errorf("failed to ensure cache directories: %w", err)
+			return
+		}
+
+		namespaceRunner := runner.NewNamespaceRunner(nsMgr, cs)
+
 		// Start execution in goroutine
 		go func() {
-			errChan <- runner.RunNode(projectDir, &wf, qNodeID, logChan)
+			errChan <- namespaceRunner.RunNode(context.Background(), projectDir, &wf, qNodeID, logChan)
 		}()
 
 		// Drain logging channel and push to client
