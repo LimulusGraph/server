@@ -72,46 +72,100 @@ func (r *NamespaceRunner) RunNode(
 		return fmt.Errorf("failed to create cache directory: %v", err)
 	}
 
-	// 3. Load input namespaces and prepare data for Python wrapper
+	// 3. Get the shared namespace for Jupyter-like data persistence
+	sharedNSID := wf.GetSharedNamespace()
+	sharedNS, exists := r.namespaceMgr.GetNamespace(sharedNSID)
+	if !exists {
+		// Create shared namespace if it doesn't exist
+		sharedNS, _ = r.namespaceMgr.CreateNamespace(
+			sharedNSID,
+			wf.Name,
+			nil, // No inputs for shared namespace - it's a global state container
+			nil, // No input ports
+			nil, // Output ports will be added dynamically
+		)
+	}
+
+	// 4. Load input namespaces and prepare data for Python wrapper
 	inputDataMap := make(map[string]interface{}) // portName -> data
 
 	for _, binding := range targetNode.InputBindings {
 		ns, exists := r.namespaceMgr.GetNamespace(binding.NamespaceID)
 		if !exists {
-			return fmt.Errorf("input namespace %s not found for port %s on node %s",
-				binding.NamespaceID, binding.PortName, nodeID)
-		}
-
-		logChan <- LogLine{
-			Source: "system",
-			Text: fmt.Sprintf("Loading input from namespace %s for port %s (path: %s)",
-				binding.NamespaceID, binding.PortName, binding.Path),
-		}
-
-		// Load data from namespace state
-		var inputData interface{}
-		if ns.State != nil {
-			dataPath := binding.Path
-			if dataPath == "" {
-				dataPath = fmt.Sprintf("data_%s", binding.PortName)
+			// Try to find the input in the shared namespace first (Jupyter-like persistence)
+			logChan <- LogLine{
+				Source: "system",
+				Text: fmt.Sprintf("Input namespace %s not found, checking shared namespace %s for port %s",
+					binding.NamespaceID, sharedNSID, binding.PortName),
 			}
 
-			if val, ok := ns.State[dataPath]; ok {
-				inputData = val
+			if sharedNS.State != nil {
+				dataPath := binding.Path
+				if dataPath == "" {
+					dataPath = fmt.Sprintf("data_%s", binding.PortName)
+				}
+
+				if _, ok := sharedNS.State[dataPath]; ok {
+					logChan <- LogLine{
+						Source: "system",
+						Text: fmt.Sprintf("Found input for port %s in shared namespace %s (path: %s)",
+							binding.PortName, sharedNSID, dataPath),
+					}
+				} else {
+					return fmt.Errorf("input path %s not found in either namespace %s or shared namespace %s",
+						binding.Path, binding.NamespaceID, sharedNSID)
+				}
 			} else {
-				return fmt.Errorf("input path %s not found in namespace %s state",
-					binding.Path, binding.NamespaceID)
+				return fmt.Errorf("input namespace %s not found for port %s on node %s",
+					binding.NamespaceID, binding.PortName, nodeID)
 			}
-		}
+		} else {
+			logChan <- LogLine{
+				Source: "system",
+				Text: fmt.Sprintf("Loading input from namespace %s for port %s (path: %s)",
+					binding.NamespaceID, binding.PortName, binding.Path),
+			}
 
-		// Store input data keyed by port name for Python wrapper generation
-		inputDataMap[binding.PortName] = inputData
+			// Load data from namespace state
+			var inputData interface{}
+			if ns.State != nil {
+				dataPath := binding.Path
+				if dataPath == "" {
+					dataPath = fmt.Sprintf("data_%s", binding.PortName)
+				}
+
+				if val, ok := ns.State[dataPath]; ok {
+					inputData = val
+				} else {
+					// Try shared namespace as fallback
+					dataPath := binding.Path
+					if dataPath == "" {
+						dataPath = fmt.Sprintf("data_%s", binding.PortName)
+					}
+
+					if val, ok := sharedNS.State[dataPath]; ok {
+						inputData = val
+						logChan <- LogLine{
+							Source: "system",
+							Text: fmt.Sprintf("Input path %s not found in namespace %s, using shared namespace %s (path: %s)",
+								binding.Path, binding.NamespaceID, sharedNSID, dataPath),
+						}
+					} else {
+						return fmt.Errorf("input path %s not found in namespace %s state",
+							binding.Path, binding.NamespaceID)
+					}
+				}
+			}
+
+			// Store input data keyed by port name for Python wrapper generation
+			inputDataMap[binding.PortName] = inputData
+		}
 	}
 
 	logChan <- LogLine{Source: "system", Text: fmt.Sprintf("All %d input namespaces loaded for node %s",
 		len(targetNode.InputBindings), nodeID)}
 
-	// 4. Generate the wrapper Python runner script code with namespace-aware inputs
+	// 5. Generate the wrapper Python runner script code with namespace-aware inputs
 	scriptFilename := targetNode.ScriptPath
 	fullScriptPath := filepath.Join(projectDir, scriptFilename)
 
@@ -156,7 +210,7 @@ func (r *NamespaceRunner) RunNode(
 		return fmt.Errorf("failed to write python runner wrapper: %v", err)
 	}
 
-	// 5. Build system exec execution
+	// 6. Build system exec execution
 	cmd := exec.Command("python3", filepath.Join(cacheDir, wrapperFilename))
 	cmd.Dir = projectDir
 
@@ -211,11 +265,8 @@ func (r *NamespaceRunner) RunNode(
 
 	logChan <- LogLine{Source: "system", Text: "Node executed successfully"}
 
-	// 6. Store outputs in namespace manager and cache storage
+	// 7. Store outputs in shared namespace for Jupyter-like persistence
 	for _, binding := range targetNode.OutputBindings {
-		// Note: In the new namespace model, outputs are stored directly in the destination namespace state
-		// The actual output data comes from the user script execution via globals_dict['outputs']
-
 		// Create or get the destination namespace for this output
 		nsID := binding.NamespaceID
 
@@ -255,6 +306,17 @@ func (r *NamespaceRunner) RunNode(
 
 		logChan <- LogLine{Source: "system", Text: fmt.Sprintf("Stored output for %s in namespace %s (path: %s)",
 			binding.PortName, nsID, outputPath)}
+
+		// Also store the same output in the shared namespace for Jupyter-like persistence
+		sharedNS.State[fmt.Sprintf("output_%s", binding.PortName)] = map[string]interface{}{
+			"port":    binding.PortName,
+			"node":    nodeID,
+			"version": ns.Version,
+		}
+
+		r.namespaceMgr.BindOutput(sharedNSID, fmt.Sprintf("shared_output_%s", binding.PortName), outputPath)
+		logChan <- LogLine{Source: "system", Text: fmt.Sprintf("Also stored output for %s in shared namespace %s (path: %s)",
+			binding.PortName, sharedNSID, outputPath)}
 	}
 
 	return nil

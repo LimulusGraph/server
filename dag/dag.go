@@ -2,7 +2,9 @@ package dag
 
 import (
 	"errors"
+	"fmt"
 	"limulus/server/namespace"
+	"strings"
 )
 
 // ============================================================================
@@ -78,6 +80,9 @@ type Workflow struct {
 
 	// Namespace manager reference (for execution engine)
 	NamespaceManager *namespace.NamespaceManager `json:"-"` // Internal namespace manager (not serialized)
+
+	// Shared namespace for data propagation across all nodes in this workflow
+	SharedNamespaceID string `json:"shared_namespace_id,omitempty"` // Single shared namespace ID for all nodes (Jupyter-like persistence)
 
 	// Execution state
 	Status string `json:"status,omitempty"` // "idle", "running", "completed", "failed"
@@ -263,4 +268,34 @@ func (w *Workflow) GetNamespaceForPort(nodeID string, portName string) (string, 
 	}
 
 	return "", errors.New("port not found on any node")
+}
+
+// GetSharedNamespace returns the shared namespace ID for this workflow (or creates one if needed)
+func (w *Workflow) GetSharedNamespace() string {
+	if w.SharedNamespaceID == "" {
+		// Auto-generate a shared namespace ID based on workflow name
+		w.SharedNamespaceID = fmt.Sprintf("shared-%s", sanitizeName(w.Name))
+	}
+	return w.SharedNamespaceID
+}
+
+// sanitizeName creates a valid namespace identifier from a string
+func sanitizeName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "unnamed"
+	}
+	// Replace invalid characters with underscores
+	normalized := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, name)
+	// Remove leading/trailing underscores and dashes
+	normalized = strings.Trim(normalized, "_-")
+	if normalized == "" {
+		return "unnamed"
+	}
+	return normalized
 }
