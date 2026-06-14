@@ -424,6 +424,8 @@ func handleRunNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Invalid workflow JSON: %v", err), http.StatusInternalServerError)
 		return
 	}
+	// Suffix the shared namespace ID with the target nodeID to achieve route isolation
+	wf.SharedNamespaceID = fmt.Sprintf("shared-%s-%s", sanitizeFilename(wf.Name), nodeID)
 
 	projectDir := filepath.Dir(projectPath)
 

@@ -9,13 +9,15 @@ import (
 
 // Namespace represents a shared state container for graph execution branches
 type Namespace struct {
-	ID        string                 `json:"id"`              // Unique namespace identifier (branch ID)
-	Name      string                 `json:"name,omitempty"`  // Human-readable name for the branch
-	CreatedAt time.Time              `json:"created_at"`      // Namespace creation timestamp
-	UpdatedAt time.Time              `json:"updated_at"`      // Last modification timestamp
-	Version   int64                  `json:"version"`         // Monotonic version counter for conflict resolution
-	State     map[string]interface{} `json:"state,omitempty"` // Shared state dictionary (JSON-serializable)
-	Metadata  NamespaceMetadata      `json:"metadata"`        // Metadata about this namespace
+	ID                 string                 `json:"id"`                  // Unique namespace identifier (branch ID)
+	Name               string                 `json:"name,omitempty"`      // Human-readable name for the branch
+	CreatedAt          time.Time              `json:"created_at"`          // Namespace creation timestamp
+	UpdatedAt          time.Time              `json:"updated_at"`          // Last modification timestamp
+	Version            int64                  `json:"version"`             // Monotonic version counter for conflict resolution
+	State              map[string]interface{} `json:"state,omitempty"`     // Shared state dictionary (JSON-serializable)
+	ModuleDependencies map[string]bool        `json:"module_dependencies,omitempty"` // Tracks which external code modules this namespace relies on
+	SymbolContextPath  string                 `json:"symbol_context_path,omitempty"` // Relative path (from project root) to the accumulated symbol context pickle for this namespace
+	Metadata           NamespaceMetadata      `json:"metadata"`            // Metadata about this namespace
 }
 
 // NamespaceMetadata contains structural information about the namespace
@@ -74,8 +76,19 @@ func NewNamespaceManager() *NamespaceManager {
 	}
 }
 
+// AddNamespace adds an existing namespace to the manager
+func (nm *NamespaceManager) AddNamespace(ns *Namespace) {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+	if nm.namespaces == nil {
+		nm.namespaces = make(map[string]*Namespace)
+	}
+	nm.namespaces[ns.ID] = ns
+}
+
 // CreateNamespace creates a new namespace with the given parameters
 func (nm *NamespaceManager) CreateNamespace(
+	id string,
 	name string,
 	branchID string,
 	state map[string]interface{},
@@ -85,16 +98,19 @@ func (nm *NamespaceManager) CreateNamespace(
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 
-	id := fmt.Sprintf("ns-%d", nm.nextID)
-	nm.nextID++
+	if id == "" {
+		id = fmt.Sprintf("ns-%d", nm.nextID)
+		nm.nextID++
+	}
 
 	namespace := &Namespace{
-		ID:        id,
-		Name:      name,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		Version:   1,
-		State:     state,
+		ID:                 id,
+		Name:               name,
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
+		Version:            1,
+		State:              state,
+		ModuleDependencies: make(map[string]bool),
 		Metadata: NamespaceMetadata{
 			BranchID:    branchID,
 			NodeCount:   0,
@@ -319,18 +335,22 @@ func (n *Namespace) MarshalJSON() ([]byte, error) {
 	return json.Marshal(aux)
 }
 
-// UnmarshalJSON implements JSON unmarshaling for Namespace
+// UnmarshalJSON implements JSON unmarshaling for Namespace.
+// Uses a pointer-to-Alias so json.Unmarshal writes directly into n's memory for all
+// fields (ID, State, ModuleDependencies, SymbolContextPath, etc.). The outer
+// CreatedAt/UpdatedAt string fields shadow the embedded time.Time fields during
+// JSON decode; we then parse and assign them explicitly.
 func (n *Namespace) UnmarshalJSON(data []byte) error {
 	type Alias Namespace
 	aux := &struct {
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
-		Alias
+		*Alias
 	}{
-		Alias: Alias(*n),
+		Alias: (*Alias)(n),
 	}
 
-	if err := json.Unmarshal(data, &aux); err != nil {
+	if err := json.Unmarshal(data, aux); err != nil {
 		return err
 	}
 
