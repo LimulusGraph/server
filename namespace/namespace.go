@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// SymbolContext represents a collection of definitions (functions, classes, constants)
+// that should be inherited by child nodes. This is separate from data state.
+type SymbolContext struct {
+	Definitions map[string]interface{} `json:"definitions,omitempty"` // Map of definition names to their values (functions, classes, constants)
+}
+
 // Namespace represents a shared state container for graph execution branches
 type Namespace struct {
 	ID                 string                 `json:"id"`                  // Unique namespace identifier (branch ID)
@@ -14,9 +20,10 @@ type Namespace struct {
 	CreatedAt          time.Time              `json:"created_at"`          // Namespace creation timestamp
 	UpdatedAt          time.Time              `json:"updated_at"`          // Last modification timestamp
 	Version            int64                  `json:"version"`             // Monotonic version counter for conflict resolution
-	State              map[string]interface{} `json:"state,omitempty"`     // Shared state dictionary (JSON-serializable)
+	State              map[string]interface{} `json:"state,omitempty"`     // Shared state dictionary (JSON-serializable) - DATA VALUES ONLY
 	ModuleDependencies map[string]bool        `json:"module_dependencies,omitempty"` // Tracks which external code modules this namespace relies on
-	SymbolContextPath  string                 `json:"symbol_context_path,omitempty"` // Relative path (from project root) to the accumulated symbol context pickle for this namespace
+	SymbolContext      *SymbolContext         `json:"symbol_context,omitempty"`     // Accumulated definitions from ancestors (functions, classes, constants)
+	SymbolContextPath  string                 `json:"symbol_context_path,omitempty"` // Relative path to the accumulated symbol context pickle for this namespace
 	Metadata           NamespaceMetadata      `json:"metadata"`            // Metadata about this namespace
 }
 

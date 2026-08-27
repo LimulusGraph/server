@@ -50,7 +50,7 @@ func (cs *CacheStorage) EnsureDirectories() error {
 // NAMESPACE PERSISTENCE
 // ============================================================================
 
-// SaveNamespace persists a namespace to disk
+// SaveNamespace persists a namespace to disk (including SymbolContext if present)
 func (cs *CacheStorage) SaveNamespace(namespaceID string, ns interface{}) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -62,6 +62,39 @@ func (cs *CacheStorage) SaveNamespace(namespaceID string, ns interface{}) error 
 	}
 
 	return os.WriteFile(namespacePath, data, 0644)
+}
+
+// SaveSymbolContext persists a SymbolContext separately from namespace state
+func (cs *CacheStorage) SaveSymbolContext(ctxID string, symCtx *SymbolContext) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	symCtxPath := filepath.Join(cs.namespaceDir, fmt.Sprintf("%s_symctx.json", ctxID))
+	data, err := json.MarshalIndent(symCtx, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal symbol context: %w", err)
+	}
+
+	return os.WriteFile(symCtxPath, data, 0644)
+}
+
+// LoadSymbolContext loads a SymbolContext from disk (separate from namespace state)
+func (cs *CacheStorage) LoadSymbolContext(ctxID string) (*SymbolContext, error) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	symCtxPath := filepath.Join(cs.namespaceDir, fmt.Sprintf("%s_symctx.json", ctxID))
+	data, err := os.ReadFile(symCtxPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read symbol context %s: %w", ctxID, err)
+	}
+
+	var symCtx SymbolContext
+	if err := json.Unmarshal(data, &symCtx); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal symbol context: %w", err)
+	}
+
+	return &symCtx, nil
 }
 
 // LoadNamespace loads a namespace from disk
@@ -430,4 +463,9 @@ type NamespaceMetadata struct {
 	OutputPorts []string               `json:"output_ports,omitempty"` // List of output port names exposed by this namespace
 	Inputs      map[string]interface{} `json:"inputs,omitempty"`       // Direct input bindings (if any)
 	Outputs     map[string]interface{} `json:"outputs,omitempty"`      // Direct outputs (if any)
+}
+
+// SymbolContext is a local copy for storage package to avoid circular dependencies
+type SymbolContext struct {
+	Definitions map[string]interface{} `json:"definitions,omitempty"` // Map of definition names to their values (functions, classes, constants)
 }
