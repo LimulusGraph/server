@@ -675,6 +675,8 @@ import os
 import pickle
 import importlib
 import types
+import inspect
+import re
 
 # ── Limulus Engine: names reserved for internal use (never injected into user scope) ──
 _LIMULUS_SYSTEM_KEYS = frozenset({
@@ -709,16 +711,36 @@ for _dep in _dependencies:
 # Paths are loaded in order; later entries win (closest ancestor node wins).
 _LIMULUS_SYM_CTX_PATHS = %s
 for _sym_path in _LIMULUS_SYM_CTX_PATHS:
-    if os.path.exists(_sym_path):
+    _abs_path = os.path.abspath(_sym_path) if not os.path.isabs(_sym_path) else _sym_path
+    if os.path.exists(_abs_path):
         try:
-            with open(_sym_path, "rb") as _f:
+            with open(_abs_path, "rb") as _f:
                 _sym_ctx = pickle.load(_f)
             if isinstance(_sym_ctx, dict):
                 for _k, _v in _sym_ctx.items():
                     if _k not in _LIMULUS_SYSTEM_KEYS:
-                        child_global[_k] = _v
+                        if isinstance(_v, dict) and _v.get("__limulus_def__"):
+                            _src = _v.get("source", "")
+                            if _src:
+                                try:
+                                    if _src.lstrip().startswith("lambda"):
+                                        exec(_k + " = " + _src, child_global)
+                                    else:
+                                        _match = re.search(r'^(?:def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)', _src, re.MULTILINE)
+                                        _orig_name = _match.group(1) if _match else _k
+                                        exec(_src, child_global)
+                                        # If source defines a different name, bind alias
+                                        if _orig_name != _k and _orig_name in child_global and _orig_name not in child_global.get("_reserved_aliases", {}):
+                                            child_global[_k] = child_global[_orig_name]
+                                except Exception as _e:
+                                    print(f"Limulus Engine Error: Failed to restore definition '{_k}': {_e}", file=sys.stderr)
+                                    raise
+                            else:
+                                child_global[_k] = _v
+                        else:
+                            child_global[_k] = _v
         except Exception as _e:
-            print(f"Limulus Engine Warning: Failed to load symbol context from {_sym_path}: {_e}", file=sys.stderr)
+            print(f"Limulus Engine Warning: Failed to load symbol context from {_abs_path}: {_e}", file=sys.stderr)
 
 # ── Phase 2b: Data namespace loading from pickle files ───────────────────────────────
 _LIMULUS_INPUT_NS_PATHS = %s
@@ -775,14 +797,39 @@ for _k, _v in list(child_global.items()):
             _active_deps.add(_v.__name__.split('.')[0])
         continue
     if isinstance(_v, (types.FunctionType, types.MethodType, type)):
+        try:
+            # Monkey-patch __main__ so inspect.getsource finds the user's script file
+            import types as _types_mod, sys as _sys_mod
+            _old_main = _sys_mod.modules.get('__main__')
+            _fake_main = _types_mod.ModuleType('__main__')
+            _fake_main.__file__ = _LIMULUS_USER_SCRIPT
+            _fake_main.__builtins__ = __builtins__
+            _sys_mod.modules['__main__'] = _fake_main
+            _src = inspect.getsource(_v)
+            _sys_mod.modules['__main__'] = _old_main
+            _LIMULUS_SYM_CTX_OUT[_k] = {"__limulus_def__": True, "name": _k, "source": _src}
+            if hasattr(_v, '__module__'):
+                _mod_name = _v.__module__.split('.')[0]
+                if _mod_name not in ('builtins', '__main__'):
+                    _active_deps.add(_mod_name)
+            continue
+        except Exception:
+            pass
+        # Fallback dependency tracking for non-source-capturable functions/classes
         if hasattr(_v, '__module__'):
             _mod_name = _v.__module__.split('.')[0]
             if _mod_name not in ('builtins', '__main__'):
                 _active_deps.add(_mod_name)
-    if hasattr(_v, '__class__') and hasattr(_v.__class__, '__module__'):
-        _mod_name = _v.__class__.__module__.split('.')[0]
-        if _mod_name not in ('builtins', '__main__'):
-            _active_deps.add(_mod_name)
+        if hasattr(_v, '__class__') and hasattr(_v.__class__, '__module__'):
+            _mod_name = _v.__class__.__module__.split('.')[0]
+            if _mod_name not in ('builtins', '__main__'):
+                _active_deps.add(_mod_name)
+        try:
+            pickle.dumps(_v)
+            _LIMULUS_SYM_CTX_OUT[_k] = _v
+        except Exception:
+            pass
+        continue
     try:
         pickle.dumps(_v)
         _LIMULUS_SYM_CTX_OUT[_k] = _v
