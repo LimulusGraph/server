@@ -342,6 +342,18 @@ func (n *Namespace) MarshalJSON() ([]byte, error) {
 	return json.Marshal(aux)
 }
 
+func (n *Namespace) Clone() (*Namespace, error) {
+	b, err := json.Marshal(n)
+	if err != nil {
+		return nil, err
+	}
+	var clone Namespace
+	if err := json.Unmarshal(b, &clone); err != nil {
+		return nil, err
+	}
+	return &clone, nil
+}
+
 // UnmarshalJSON implements JSON unmarshaling for Namespace.
 // Uses a pointer-to-Alias so json.Unmarshal writes directly into n's memory for all
 // fields (ID, State, ModuleDependencies, SymbolContextPath, etc.). The outer

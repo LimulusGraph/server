@@ -64,7 +64,33 @@ func (r *NamespaceRunner) RunNode(
 		return fmt.Errorf("node %s not found in workflow", nodeID)
 	}
 
+	// Detect multiversal parents
+	var parents []string
+	for _, edge := range wf.Edges {
+		if !edge.Disabled && edge.To == nodeID {
+			parents = append(parents, edge.From)
+		}
+	}
+
 	logChan <- LogLine{Source: "system", Text: fmt.Sprintf("Starting node execution: %s (%s)", targetNode.Title, targetNode.ScriptPath)}
+
+	// Multiversal execution: run once per parent namespace
+	multiversalRuns := 1
+	if len(parents) > 1 {
+		multiversalRuns = len(parents)
+		logChan <- LogLine{Source: "system", Text: fmt.Sprintf("Multiversal execution: node %s has %d parents, running %d times", nodeID, len(parents), multiversalRuns)}
+	}
+
+	for runIdx := 0; runIdx < multiversalRuns; runIdx++ {
+		err := func() error {
+		if multiversalRuns > 1 {
+			logChan <- LogLine{Source: "system", Text: fmt.Sprintf("Multiversal run %d/%d for node %s", runIdx+1, multiversalRuns, nodeID)}
+		}
+		// Multiversal filter: for >1 parents, run within each parent's namespace context
+		currentBindings := targetNode.InputBindings
+		if multiversalRuns > 1 && len(currentBindings) > 0 {
+			currentBindings = []dag.InputBinding{currentBindings[runIdx%len(currentBindings)]}
+		}
 
 	// 2. Ensure .limulus_cache exists
 	cacheDir := filepath.Join(projectDir, ".limulus_cache")
@@ -73,11 +99,13 @@ func (r *NamespaceRunner) RunNode(
 	}
 
 	// 3. Get the shared namespace for Jupyter-like data persistence
-	sharedNSID := wf.GetSharedNamespace()
-	sharedNS, exists := r.namespaceMgr.GetNamespace(sharedNSID)
+	// Shared namespace stays original for input/data loading; outputs isolated per run
+	originalSharedNSID := wf.GetSharedNamespace()
+	sharedNSID := originalSharedNSID
+	sharedNS, exists := r.namespaceMgr.GetNamespace(originalSharedNSID)
 	if !exists {
-		// Try to load from CacheStorage
-		nsData, err := r.cacheStorage.LoadNamespace(sharedNSID)
+		// Try to load from CacheStorage using original shared namespace
+		nsData, err := r.cacheStorage.LoadNamespace(originalSharedNSID)
 		if err == nil {
 			nsBytes, _ := json.Marshal(nsData)
 			var ns namespace.Namespace
@@ -105,9 +133,14 @@ func (r *NamespaceRunner) RunNode(
 	if sharedNS.ModuleDependencies == nil {
 		sharedNS.ModuleDependencies = make(map[string]bool)
 	}
+	// Clone so each multiversal run modifies its own copy, not shared state
+	clonedShared, err := sharedNS.Clone()
+	if err == nil {
+		sharedNS = clonedShared
+	}
 
-	// Load input namespaces from disk if not already in memory
-	for _, binding := range targetNode.InputBindings {
+	// Load input namespaces from disk if not already in memory (original kept in manager)
+	for _, binding := range currentBindings {
 		if _, exists := r.namespaceMgr.GetNamespace(binding.NamespaceID); !exists {
 			nsData, err := r.cacheStorage.LoadNamespace(binding.NamespaceID)
 			if err == nil {
@@ -122,8 +155,13 @@ func (r *NamespaceRunner) RunNode(
 
 	// Phase 1: Build unique module dependencies list
 	dependencies := make(map[string]bool)
-	for _, binding := range targetNode.InputBindings {
-		if ns, exists := r.namespaceMgr.GetNamespace(binding.NamespaceID); exists {
+	for _, binding := range currentBindings {
+		ns, exists := r.namespaceMgr.GetNamespace(binding.NamespaceID)
+		if exists && ns != nil {
+			// Clone so dependency tracking doesn't corrupt the manager's namespace
+			if clonedNS, cloneErr := ns.Clone(); cloneErr == nil {
+				ns = clonedNS
+			}
 			for dep := range ns.ModuleDependencies {
 				dependencies[dep] = true
 			}
@@ -148,7 +186,7 @@ func (r *NamespaceRunner) RunNode(
 		seenSymCtx[sharedNS.SymbolContextPath] = true
 		symbolContextPaths = append(symbolContextPaths, sharedNS.SymbolContextPath)
 	}
-	for _, binding := range targetNode.InputBindings {
+	for _, binding := range currentBindings {
 		if ns, exists := r.namespaceMgr.GetNamespace(binding.NamespaceID); exists {
 			if ns.SymbolContextPath != "" && !seenSymCtx[ns.SymbolContextPath] {
 				seenSymCtx[ns.SymbolContextPath] = true
@@ -160,7 +198,7 @@ func (r *NamespaceRunner) RunNode(
 	// 4. Load input namespaces and prepare data for Python wrapper
 	inputDataMap := make(map[string]interface{}) // portName -> data
 
-	for _, binding := range targetNode.InputBindings {
+	for _, binding := range currentBindings {
 		ns, exists := r.namespaceMgr.GetNamespace(binding.NamespaceID)
 		if !exists {
 			// Try to find the input in the shared namespace first (Jupyter-like persistence)
@@ -213,6 +251,10 @@ func (r *NamespaceRunner) RunNode(
 					binding.NamespaceID, sharedNSID, binding.PortName)
 			}
 		} else {
+			// Clone input namespace so this run doesn't corrupt others
+			if clonedNS, cloneErr := ns.Clone(); cloneErr == nil {
+				ns = clonedNS
+			}
 			logChan <- LogLine{
 				Source: "system",
 				Text: fmt.Sprintf("Loading input from namespace %s for port %s (path: %s)",
@@ -298,7 +340,12 @@ func (r *NamespaceRunner) RunNode(
 	}
 
 	logChan <- LogLine{Source: "system", Text: fmt.Sprintf("All %d input namespaces loaded for node %s",
-		len(targetNode.InputBindings), nodeID)}
+		len(currentBindings), nodeID)}
+
+	executionNodeID := nodeID
+	if multiversalRuns > 1 {
+		executionNodeID = fmt.Sprintf("%s_multiversal_%d", nodeID, runIdx)
+	}
 
 	// 5. Generate the wrapper Python runner script code with namespace-aware inputs
 	scriptFilename := targetNode.ScriptPath
@@ -313,13 +360,13 @@ func (r *NamespaceRunner) RunNode(
 		logChan <- LogLine{Source: "system", Text: fmt.Sprintf("Created default script: %s", scriptFilename)}
 	}
 
-	wrapperFilename := fmt.Sprintf("__runner_%s__.py", nodeID)
+	wrapperFilename := fmt.Sprintf("__runner_%s__.py", executionNodeID)
 	wrapperPath := filepath.Join(cacheDir, wrapperFilename)
 
 	var inputBlock string
-	if len(targetNode.InputBindings) > 0 {
-		inputLines := make([]string, 0, len(targetNode.InputBindings))
-		for _, binding := range targetNode.InputBindings {
+	if len(currentBindings) > 0 {
+		inputLines := make([]string, 0, len(currentBindings))
+		for _, binding := range currentBindings {
 			data := inputDataMap[binding.PortName]
 
 			if data != nil {
@@ -336,7 +383,7 @@ func (r *NamespaceRunner) RunNode(
 	// Build input/output pickle paths
 	inputNSPaths := []string{}
 	seenNS := make(map[string]bool)
-	for _, binding := range targetNode.InputBindings {
+	for _, binding := range currentBindings {
 		if !seenNS[binding.NamespaceID] {
 			seenNS[binding.NamespaceID] = true
 			path := filepath.ToSlash(filepath.Join(".limulus_cache", "namespaces", fmt.Sprintf("%s.pkl", binding.NamespaceID)))
@@ -358,9 +405,9 @@ func (r *NamespaceRunner) RunNode(
 	outputNSPaths = append(outputNSPaths, sharedNSPath)
 
 	wrapperCode := r.generateNamespaceAwareWrapper(
-		nodeID,
+		executionNodeID,
 		scriptFilename,
-		targetNode.InputBindings,
+		currentBindings,
 		targetNode.OutputBindings,
 		inputBlock,
 		depList,
@@ -432,6 +479,9 @@ func (r *NamespaceRunner) RunNode(
 	for _, binding := range targetNode.OutputBindings {
 		// Create or get the destination namespace for this output
 		nsID := binding.NamespaceID
+		if multiversalRuns > 1 {
+			nsID = fmt.Sprintf("%s_multiversal_%d", binding.NamespaceID, runIdx)
+		}
 
 		var ns *namespace.Namespace
 		if existingNS, exists := r.namespaceMgr.GetNamespace(nsID); exists {
@@ -452,8 +502,8 @@ func (r *NamespaceRunner) RunNode(
 				var createErr error
 				ns, createErr = r.namespaceMgr.CreateNamespace(
 					nsID,
-					fmt.Sprintf("output-%s", nodeID),
-					nodeID,
+					fmt.Sprintf("output-%s", executionNodeID),
+					executionNodeID,
 					nil,                        // No inputs for output-only namespace
 					nil,                        // No input ports
 					[]string{binding.PortName}, // Output ports
@@ -477,7 +527,7 @@ func (r *NamespaceRunner) RunNode(
 		}
 
 		// Load actual output from the JSON file written by the Python script
-		outputPathFile := filepath.Join(cacheDir, fmt.Sprintf("outputs_%s_%s.json", nodeID, binding.PortName))
+		outputPathFile := filepath.Join(cacheDir, fmt.Sprintf("outputs_%s_%s.json", executionNodeID, binding.PortName))
 		var outputVal interface{}
 		if fileBytes, err := os.ReadFile(outputPathFile); err == nil {
 			if err := json.Unmarshal(fileBytes, &outputVal); err != nil {
@@ -515,7 +565,7 @@ func (r *NamespaceRunner) RunNode(
 	}
 
 	// Read dependencies from metadata file and update namespaces
-	metaPath := filepath.Join(cacheDir, fmt.Sprintf("metadata_%s.json", nodeID))
+	metaPath := filepath.Join(cacheDir, fmt.Sprintf("metadata_%s.json", executionNodeID))
 	var meta struct {
 		Dependencies []string `json:"dependencies"`
 	}
@@ -537,8 +587,8 @@ func (r *NamespaceRunner) RunNode(
 	// Propagate the accumulated symbol context path to output namespaces and sharedNS.
 	// The Python wrapper writes symctx_<nodeID>.pkl only on successful execution;
 	// we stat-check before setting so a failed exec doesn't corrupt downstream paths.
-	symCtxRelPath := filepath.ToSlash(filepath.Join(".limulus_cache", fmt.Sprintf("symctx_%s.pkl", nodeID)))
-	symCtxAbsPath := filepath.Join(cacheDir, fmt.Sprintf("symctx_%s.pkl", nodeID))
+	symCtxRelPath := filepath.ToSlash(filepath.Join(".limulus_cache", fmt.Sprintf("symctx_%s.pkl", executionNodeID)))
+	symCtxAbsPath := filepath.Join(cacheDir, fmt.Sprintf("symctx_%s.pkl", executionNodeID))
 	if _, statErr := os.Stat(symCtxAbsPath); statErr == nil {
 		sharedNS.SymbolContextPath = symCtxRelPath
 		for _, binding := range targetNode.OutputBindings {
@@ -559,7 +609,13 @@ func (r *NamespaceRunner) RunNode(
 				return fmt.Errorf("failed to save output namespace %s: %v", binding.NamespaceID, err)
 			}
 		}
+		}
+		return nil
+	}()
+	if err != nil {
+		return err
 	}
+	} // end multiversal loop
 
 	return nil
 }
