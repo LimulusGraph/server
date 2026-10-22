@@ -7,23 +7,23 @@ import (
 	"fmt"
 	"io"
 	"limulus/server/dag"
-	"limulus/server/namespace"
 	"limulus/server/runner"
-	"limulus/server/storage"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
+	"time"
 )
 
-// CacheMetadata stores last successful MD5 execution values
-type CacheMetadata struct {
-	NodeMD5s map[string]string `json:"node_md5s"`
-}
+var universes = runner.NewUniverseManager()
 
 func main() {
+	defer universes.Close()
 	port := "8080"
 	if envPort := os.Getenv("LIMULUS_PORT"); envPort != "" {
 		port = envPort
@@ -39,9 +39,19 @@ func main() {
 	http.HandleFunc("/api/node/save_code", enableCORS(handleSaveCode))
 	http.HandleFunc("/api/node/run", enableCORS(handleRunNode))
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	server := &http.Server{Addr: ":" + port, BaseContext: func(net.Listener) context.Context { return ctx }}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+		_ = server.Close()
+	}()
 	fmt.Printf("Limulus Computational Server starting on port %s...\n", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("Server failed: %v", err)
 	}
 }
 
@@ -401,202 +411,56 @@ func handleSaveCode(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"success"}`))
 }
 
-// 5. Execute Node with SSE Logs Streaming
+// Execute route-local kernels and stream structured, universe-tagged events.
 func handleRunNode(w http.ResponseWriter, r *http.Request) {
 	projectPath := r.URL.Query().Get("project_path")
 	nodeID := r.URL.Query().Get("node_id")
-	runMode := r.URL.Query().Get("run_mode") // "upstream" or "node_only"
-
-	if projectPath == "" || nodeID == "" {
-		http.Error(w, "Missing 'project_path' or 'node_id' query parameters", http.StatusBadRequest)
+	mode := r.URL.Query().Get("run_mode")
+	if projectPath == "" {
+		http.Error(w, "Missing project_path", http.StatusBadRequest)
 		return
 	}
-
-	// Read workflow to trace DAG
 	data, err := os.ReadFile(projectPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read workflow file: %v", err), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	wf, err := decodeWorkflowToDag(data)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid workflow JSON: %v", err), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Suffix the shared namespace ID with the target nodeID to achieve route isolation
-	wf.SharedNamespaceID = fmt.Sprintf("shared-%s-%s", sanitizeFilename(wf.Name), nodeID)
-
-	projectDir := filepath.Dir(projectPath)
-
-	// Set headers for Server-Sent Events (SSE)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-
-	// Send helper function to stream SSE lines
-	streamLog := func(source, text string) {
-		payload := map[string]string{
-			"source": source,
-			"text":   text,
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	events := make(chan runner.Event, 128)
+	go func() {
+		defer close(events)
+		emit := func(e runner.Event) {
+			select {
+			case events <- e:
+			case <-r.Context().Done():
+			}
 		}
-		jsonBytes, _ := json.Marshal(payload)
-		fmt.Fprintf(w, "data: %s\n\n", string(jsonBytes))
+		err := universes.Run(r.Context(), projectPath, &wf, nodeID, mode, emit)
+		text := "COMPLETED_SUCCESS"
+		if err != nil {
+			text = err.Error()
+		}
+		emit(runner.Event{Kind: "completed", Source: "system", Text: text, Success: err == nil})
+	}()
+	for event := range events {
+		payload, _ := json.Marshal(event)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			return
+		}
 		flusher.Flush()
 	}
-
-	// Determine queue based on runMode
-	var queue []string
-	if runMode == "node_only" {
-		queue = []string{nodeID}
-	} else {
-		// Default to upstream
-		var err error
-		queue, err = wf.GetExecutionOrderForNode(nodeID)
-		if err != nil {
-			streamLog("system", fmt.Sprintf("DAG_ERROR: %v", err))
-			return
-		}
-	}
-
-	// Load Cache Metadata
-	cacheDir := filepath.Join(projectDir, ".limulus_cache")
-	metadataPath := filepath.Join(cacheDir, "cache_metadata.json")
-	var cache CacheMetadata
-	cache.NodeMD5s = make(map[string]string)
-
-	if metaBytes, err := os.ReadFile(metadataPath); err == nil {
-		_ = json.Unmarshal(metaBytes, &cache)
-	}
-
-	reExecutedNodes := make(map[string]bool)
-
-	// Run execution queue
-	for i, qNodeID := range queue {
-		// Find Node Object in workflow
-		var nodeObj *dag.Node
-		for nIdx := range wf.Nodes {
-			if wf.Nodes[nIdx].ID == qNodeID {
-				nodeObj = &wf.Nodes[nIdx]
-				break
-			}
-		}
-
-		if nodeObj == nil {
-			streamLog("system", fmt.Sprintf("EXECUTION_ERROR: Node %s not found", qNodeID))
-			return
-		}
-		if strings.TrimSpace(nodeObj.ScriptPath) == "" {
-			streamLog("system", fmt.Sprintf("EXECUTION_ERROR: Node %s has no script path. Save or relink its script first.", qNodeID))
-			return
-		}
-
-		// 1. Caching Checks:
-		// We skip executing this node if:
-		// - It is an upstream node (not the target node itself, i.e., index < len(queue) - 1)
-		// - Its script exists and matches the cached MD5
-		// - No parents were re-executed in this run chain
-		// - All outputs pickle files exist on disk
-		isTarget := i == len(queue)-1
-		skipExecution := false
-
-		scriptPath := filepath.Join(projectDir, nodeObj.ScriptPath)
-		currentMD5 := ""
-		if _, err := os.Stat(scriptPath); err == nil {
-			currentMD5, _ = runner.GetMD5(scriptPath)
-		}
-
-		if !isTarget {
-			// Check outputs
-			outputsExist := true
-			for _, edge := range wf.Edges {
-				if edge.Disabled || edge.From != qNodeID {
-					continue
-				}
-				pklPath := filepath.Join(cacheDir, fmt.Sprintf("node_%s_%s.pkl", qNodeID, edge.FromPort))
-				if _, err := os.Stat(pklPath); os.IsNotExist(err) {
-					outputsExist = false
-					break
-				}
-			}
-
-			// Check parents
-			parentsReExecuted := false
-			for _, edge := range wf.Edges {
-				if edge.Disabled || edge.To != qNodeID {
-					continue
-				}
-				if reExecutedNodes[edge.From] {
-					parentsReExecuted = true
-					break
-				}
-			}
-
-			cachedMD5 := cache.NodeMD5s[qNodeID]
-			if outputsExist && !parentsReExecuted && cachedMD5 != "" && cachedMD5 == currentMD5 {
-				skipExecution = true
-			}
-		}
-
-		if skipExecution {
-			streamLog("system", fmt.Sprintf("[SKIPPED] %s: Using cached results.", nodeObj.Title))
-			continue
-		}
-
-		// 2. Perform Run
-		logChan := make(chan runner.LogLine)
-		errChan := make(chan error, 1)
-
-		// Create namespace-aware runner
-		nsMgr := namespace.NewNamespaceManager()
-		cs := storage.NewCacheStorage(filepath.Join(projectDir, ".limulus_cache"))
-		if err := cs.EnsureDirectories(); err != nil {
-			errChan <- fmt.Errorf("failed to ensure cache directories: %w", err)
-			return
-		}
-
-		namespaceRunner := runner.NewNamespaceRunner(nsMgr, cs)
-
-		// Start execution in goroutine
-		go func() {
-			errChan <- namespaceRunner.RunNode(context.Background(), projectDir, &wf, qNodeID, logChan)
-		}()
-
-		// Drain logging channel and push to client
-		for line := range logChan {
-			streamLog(line.Source, line.Text)
-		}
-
-		// Wait for execution completion
-		runErr := <-errChan
-		if runErr != nil {
-			streamLog("system", fmt.Sprintf("EXECUTION_FAILED at node %s: %v", nodeObj.Title, runErr))
-			return
-		}
-
-		// Mark node as re-executed in this run context
-		reExecutedNodes[qNodeID] = true
-
-		// Write new MD5 cache if script exists
-		if currentMD5 != "" {
-			cache.NodeMD5s[qNodeID] = currentMD5
-		}
-	}
-
-	// 3. Save cache metadata file
-	_ = os.MkdirAll(cacheDir, 0755)
-	if prettyBytes, err := json.MarshalIndent(cache, "", "  "); err == nil {
-		_ = os.WriteFile(metadataPath, prettyBytes, 0644)
-	}
-
-	streamLog("system", "COMPLETED_SUCCESS")
 }
 
 func decodeWorkflowToDag(raw []byte) (dag.Workflow, error) {

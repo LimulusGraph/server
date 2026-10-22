@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    {"id":"setup","type":"custom","position":{"x":260,"y":40},"data":{"title":"Define model","scriptPath":"nodes/setup.py"}},
+    {"id":"small","type":"custom","position":{"x":80,"y":200},"data":{"title":"Scale 2","scriptPath":"nodes/small.py"}},
+    {"id":"large","type":"custom","position":{"x":440,"y":200},"data":{"title":"Scale 4","scriptPath":"nodes/large.py"}},
+    {"id":"evaluate","type":"custom","position":{"x":260,"y":360},"data":{"title":"Evaluate","scriptPath":"nodes/evaluate.py"}}
+  ],
+  "edges": [
+    {"id":"setup-small","source":"setup","target":"small","type":"custom"},
+    {"id":"setup-large","source":"setup","target":"large","type":"custom"},
+    {"id":"small-evaluate","source":"small","target":"evaluate","type":"custom"},
+    {"id":"large-evaluate","source":"large","target":"evaluate","type":"custom"}
+  ]
+}
