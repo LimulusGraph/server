@@ -92,3 +92,22 @@ func TestExampleUniverses(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureScriptsPreservesNodeNumber(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "graph.lmg")
+	body := []byte(`{"nextNodeId":8,"nodes":[{"id":"7","data":{"title":"Node 7","scriptPath":"nodes/7.py"}}],"edges":[]}`)
+	updated, err := ensureScriptsForWorkflow(path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow RFWorkflow
+	if err := json.Unmarshal(updated, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	if workflow.NextNodeID != 8 || workflow.Nodes[0].ID != "7" {
+		t.Fatalf("numbering lost during normalization: %s", updated)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "nodes", "7.py")); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -56,8 +56,9 @@ func main() {
 }
 
 type RFWorkflow struct {
-	Nodes []RFNode `json:"nodes"`
-	Edges []RFEdge `json:"edges"`
+	NextNodeID int      `json:"nextNodeId,omitempty"`
+	Nodes      []RFNode `json:"nodes"`
+	Edges      []RFEdge `json:"edges"`
 }
 
 type RFNode struct {
