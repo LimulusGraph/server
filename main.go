@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,7 +42,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	server := &http.Server{Addr: ":" + port, BaseContext: func(net.Listener) context.Context { return ctx }}
+	server := &http.Server{Addr: net.JoinHostPort(os.Getenv("LIMULUS_HOST"), port), BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -49,8 +50,13 @@ func main() {
 		_ = server.Shutdown(shutdown)
 		_ = server.Close()
 	}()
-	fmt.Printf("Limulus Computational Server starting on port %s...\n", port)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		log.Printf("Server failed: %v", err)
+		return
+	}
+	fmt.Printf("LIMULUS_LISTEN_ADDR=%s\n", listener.Addr())
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		log.Printf("Server failed: %v", err)
 	}
 }
@@ -88,7 +94,18 @@ var nonWordRegexp = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 // CORS & Method Middleware
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// The desktop app keeps its existing local API. Managed extension servers
+		// require an unguessable token and do not grant browser CORS access.
+		token := os.Getenv("LIMULUS_TOKEN")
+		if token != "" {
+			expected := "Bearer " + token
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(expected)) != 1 {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == "OPTIONS" {

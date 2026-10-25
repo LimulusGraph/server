@@ -111,3 +111,24 @@ func TestEnsureScriptsPreservesNodeNumber(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestManagedServerAuthentication(t *testing.T) {
+	t.Setenv("LIMULUS_TOKEN", "private-token")
+	handler := enableCORS(handleHealth)
+	for _, auth := range []string{"", "Bearer wrong", "Bearer private-token"} {
+		req := httptest.NewRequest("GET", "/api/health", nil)
+		req.Header.Set("Authorization", auth)
+		response := httptest.NewRecorder()
+		handler(response, req)
+		expected := 401
+		if auth == "Bearer private-token" {
+			expected = 200
+		}
+		if response.Code != expected {
+			t.Fatalf("got %d, expected %d", response.Code, expected)
+		}
+		if response.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Fatal("managed server unexpectedly granted browser CORS")
+		}
+	}
+}

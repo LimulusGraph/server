@@ -43,7 +43,11 @@ func startKernel(dir string) (*kernel, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("python3", "-u", "-c", kernelSource)
+	python := os.Getenv("LIMULUS_PYTHON")
+	if python == "" {
+		python = "python3"
+	}
+	cmd := exec.Command(python, "-u", "-c", kernelSource)
 	cmd.Dir = dir
 	configureKernelProcess(cmd)
 	cmd.ExtraFiles = []*os.File{writer}
