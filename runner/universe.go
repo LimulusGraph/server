@@ -20,13 +20,29 @@ import (
 //go:embed kernel.py
 var kernelSource string
 
+type DisplayOutput struct {
+	Kind         string     `json:"kind"`
+	Text         string     `json:"text,omitempty"`
+	MIME         string     `json:"mime,omitempty"`
+	Data         string     `json:"data,omitempty"`
+	Caption      string     `json:"caption,omitempty"`
+	Columns      []string   `json:"columns,omitempty"`
+	Index        []string   `json:"index,omitempty"`
+	Rows         [][]string `json:"rows,omitempty"`
+	TotalRows    int        `json:"total_rows"`
+	TotalColumns int        `json:"total_columns"`
+	Truncated    bool       `json:"truncated,omitempty"`
+}
+
 type Event struct {
-	Kind    string `json:"kind"`
-	Source  string `json:"source,omitempty"`
-	Text    string `json:"text,omitempty"`
-	RouteID string `json:"route_id,omitempty"`
-	NodeID  string `json:"node_id,omitempty"`
-	Success bool   `json:"success"`
+	Line    int            `json:"line,omitempty"`
+	Output  *DisplayOutput `json:"output,omitempty"`
+	Kind    string         `json:"kind"`
+	Source  string         `json:"source,omitempty"`
+	Text    string         `json:"text,omitempty"`
+	RouteID string         `json:"route_id,omitempty"`
+	NodeID  string         `json:"node_id,omitempty"`
+	Success bool           `json:"success"`
 }
 
 type kernel struct {
