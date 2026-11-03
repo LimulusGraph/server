@@ -63,7 +63,14 @@ func startKernel(dir string) (*kernel, error) {
 	if python == "" {
 		python = "python3"
 	}
+	localPython := filepath.Join(dir, ".venv", "bin", "python")
+	if _, err := os.Stat(localPython); err == nil {
+		python = localPython
+	}
 	cmd := exec.Command(python, "-u", "-c", kernelSource)
+	if python == localPython {
+		cmd.Env = append(os.Environ(), "VIRTUAL_ENV="+filepath.Join(dir, ".venv"), "PATH="+filepath.Join(dir, ".venv", "bin")+string(os.PathListSeparator)+os.Getenv("PATH"), "PYTHONNOUSERSITE=1")
+	}
 	cmd.Dir = dir
 	configureKernelProcess(cmd)
 	cmd.ExtraFiles = []*os.File{writer}
