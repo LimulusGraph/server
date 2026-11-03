@@ -1,5 +1,9 @@
 # Limulus execution server
 
+> **Active development:** Limulus is under active development, and breaking changes are still occurring.
+> Features, APIs, and file formats may change between versions.
+> **We welcome your feedback!** [Report a bug, suggest a feature, or share your experience](https://github.com/LimulusGraph/server/issues).
+
 The Python execution backend for [Limulus](https://github.com/LimulusGraph).
 It validates graph paths, manages persistent Python universes, and streams
 execution events to the browser application and VS Code extension.
@@ -14,13 +18,12 @@ This repository builds only the execution server. It never opens a browser,
 embeds frontend assets, or serves an editor. The API listens on
 **http://127.0.0.1:8080** by default; `/api/health` reports readiness.
 
-GitHub Actions tests the backend on Linux, macOS, and Windows and produces
-`limulus-server-<os>-<arch>` archives for amd64 and arm64. Each archive contains
+Backend `limulus-server-<os>-<arch>` archives contain
 `limulus` (`limulus.exe` on Windows), examples, build metadata, and a SHA-256
-checksum. Pushing a `v*` tag publishes these backend artifacts as a GitHub Release.
+checksum.
 
-Standalone installers and VS Code extensions are built, tested, and released
-from [LimulusGraph/clients](https://github.com/LimulusGraph/clients). Choose a
+Standalone installers and VS Code extensions are available from
+[LimulusGraph/clients](https://github.com/LimulusGraph/clients). Choose a
 client installer for an interactive workspace; a server archive contains only
 the execution API.
 
@@ -123,7 +126,3 @@ go test ./...
 go build -o bin/limulus .
 python scripts/package.py --os linux  # Also accepts darwin or windows
 ```
-
-The server workflow builds only this repository. UI builds, installer validation,
-and client releases belong to the clients workflow, which resolves its backend
-revision once and reuses that exact commit across all native build jobs.
