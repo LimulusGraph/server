@@ -37,7 +37,7 @@ func TestDisplayOutputAndSourceLines(t *testing.T) {
 }
 
 func TestMatplotlibInlinePlots(t *testing.T) {
-	if err := exec.Command("python3", "-c", "import matplotlib").Run(); err != nil {
+	if err := exec.Command(testPython(), "-c", "import matplotlib").Run(); err != nil {
 		t.Skip("matplotlib is not installed")
 	}
 	t.Setenv("MPLCONFIGDIR", t.TempDir())
@@ -75,7 +75,7 @@ print('automatic figure')
 }
 
 func TestPandasInlineTables(t *testing.T) {
-	if err := exec.Command("python3", "-c", "import pandas").Run(); err != nil {
+	if err := exec.Command(testPython(), "-c", "import pandas").Run(); err != nil {
 		t.Skip("pandas is not installed")
 	}
 	path, wf := fixture(t, map[string]string{"1": `import pandas as pd

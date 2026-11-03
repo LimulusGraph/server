@@ -1,113 +1,191 @@
-# Limulus runtime
+# Limulus
 
-Limulus treats every complete path from a root (no enabled incoming edges) to a
-leaf (no enabled outgoing edges) as an independent notebook, or **universe**.
-A standalone node is also a universe. A diamond `A → B → D`, `A → C → D`
-creates two universes. Each runs its own copy of A and D; D never merges B and C.
-Disabled edges do not participate. Cycles and dangling edges are rejected.
+Limulus is a local, browser-based editor for Python workflows. Connect cells into
+a graph, run independent experiments, and inspect their output in your browser.
+The server hosts the editor and runs your Python code on your machine.
 
-## Running
+Each complete path through a graph is an independent notebook, called a
+**universe**. Universes keep separate Python state, even when they share cells.
 
-Install Go, Node.js (compatible with Vite 8), npm, and Python 3. Put `python3`
-on PATH. From this directory run:
+## Requirements
+
+- Python 3 and any Python packages your workflows use.
+- A web browser.
+
+Python is not bundled with Limulus. Check that it is available before starting:
 
 ```sh
-make run
+python3 --version
 ```
 
-Open **http://127.0.0.1:8080**. The Go server hosts both the editor and its API;
-no native app or Rust toolchain is required. `make build` creates `bin/limulus`
-with the browser assets embedded, so the binary can run from any directory.
-Rebuild after frontend changes. Plain `go run .` uses the last built bundle;
-without a bundle, the API still works and the home page explains how to build it.
+On Windows, use `py -3 --version`. If Python is missing, install Python 3 before
+continuing. The compiled app includes both the server and browser editor.
+No build tools are required.
 
-The server binds to loopback by default. `LIMULUS_PORT` changes the port and
-`LIMULUS_HOST` overrides the bind address. Open and Save As ask for local `.lmg`
-paths; relative paths are resolved from the server's working directory. Save As
-copies the workflow's Python scripts alongside the graph. Edit scripts in your
-usual editor, then run them from the browser. Files remain on the local machine.
+## Install and start
 
-For frontend development, start `go run .` here and `npm run dev` in `../client`.
-Open the Vite URL (port 3000); `/api` is proxied to the Go server. Set
-`LIMULUS_API_URL` when starting Vite to use a different backend address.
-Servers started with `LIMULUS_TOKEN` retain the extension's bearer authentication
-and do not expose the browser editor.
+Download the compiled archive for your operating system and processor:
 
-No Python serialization package is required. Python packages used by cells must
-be installed in that interpreter's environment. Launch the server with the desired
-virtual environment on PATH.
+| System | Archive |
+| --- | --- |
+| macOS, Apple silicon | `limulus-darwin-arm64.tar.gz` |
+| macOS, Intel | `limulus-darwin-amd64.tar.gz` |
+| Linux, x64 | `limulus-linux-amd64.tar.gz` |
+| Linux, ARM64 | `limulus-linux-arm64.tar.gz` |
+| Windows, x64 | `limulus-windows-amd64.zip` |
+| Windows, ARM64 | `limulus-windows-arm64.zip` |
 
-The editor provides:
+Once you have the archive, extract it and run the executable. For example, on an
+Apple silicon Mac:
 
-- **Run all universes**: restart all routes and run every cell, concurrently across routes.
-- **Run through node**: restart every complete route containing the selected node,
-  then execute each route's prefix through that node.
-- **Run cell**: run just the selected cell in each matching live runtime. Earlier
-  cells on each route must have succeeded first. Root cells can start fresh runtimes.
-- **Reset runtimes**: stop every runtime for the project and release its memory.
-- **Stop**: disconnect the current execution; active route processes are terminated.
+```sh
+tar -xzf limulus-darwin-arm64.tar.gz
+cd limulus-darwin-arm64
+./limulus
+```
 
-Each universe owns a persistent Python process with a real `__main__` module.
-Cells execute in the same global dictionary, in route order. Functions, closures,
-classes, instances, imports, tensors, and mutable values retain their live identity.
-As in a notebook, changing a variable affects functions that reference that global.
-Rerunning a cell does not automatically rerun later cells or erase its old variables.
-Use Run through node or Run all for fresh state after editing upstream code.
+On Linux, substitute the matching Linux archive and directory names. On Windows,
+run these commands in PowerShell from the directory containing the ZIP file:
 
-Ordinary Python globals are the primary cell interface. For existing port-based
-code, `outputs['out']` from the route's predecessor becomes `inputs['in']` in the
-next cell (using the edge's port names). Values are live references, not JSON.
-Each cell starts with a fresh `outputs` dictionary, and predecessor outputs are
-retained separately for cell reruns. Runtime objects never enter the graph file.
+```powershell
+Expand-Archive .\limulus-windows-amd64.zip -DestinationPath .
+Set-Location .\limulus-windows-amd64
+$env:LIMULUS_PYTHON = py -3 -c "import sys; print(sys.executable)"
+.\limulus.exe
+```
 
-## Isolation and lifecycle
+Limulus opens **http://127.0.0.1:8080** in your default browser when it is ready.
+Keep the terminal open while you work. Press **Ctrl+C** in that terminal to stop
+the server and its Python runtimes. If the browser does not open automatically,
+open the URL printed in the terminal.
 
-Routes run concurrently in separate processes; cells within a route run sequentially.
-A route ID is derived from its node IDs, script paths, and edge identities/ports.
-Runtimes are scoped by the absolute project filename and route ID. Graph changes
-retire obsolete runtimes on the next execution. Requests within one project are
-serialized; separate projects can execute concurrently.
+## Set up a project
 
-A failed cell stops its route and discards that runtime's partial state. Other
-routes continue. Runtime state lasts until restart, reset, failure, cancellation,
-or server shutdown; it is not persisted to disk. Python source and `.lmg` graph
-files remain the durable project representation. Old `.limulus_cache` snapshots
-are not read by the new runner.
+Create a directory for your workflow and its Python environment. On macOS/Linux:
 
-Process isolation covers Python memory, not external side effects: universes share
-the project working directory, filesystem, network, and accelerators. Shared-prefix
-cells execute once per universe, so their file writes and other side effects also
-repeat. Use distinct output paths when experiments write artifacts. All universes
-consume their own memory, including model weights. Graphs exceeding 128 routes
-are rejected before starting execution.
+```sh
+mkdir -p ~/limulus-projects/my-experiment
+cd ~/limulus-projects/my-experiment
+python3 -m venv .venv
+.venv/bin/python -m pip install numpy pandas
+```
 
-The fd-based kernel protocol currently targets macOS/Linux. Child process groups
-are terminated on reset/cancel to clean up training subprocesses. Interactive
-stdin prompts are unsupported. Python text and native extension output are forwarded on separate pipes; stream
-barriers drain native output before each cell completion event.
+On Windows, in PowerShell:
 
-## Architecture and API
+```powershell
+New-Item -ItemType Directory -Force "$HOME\limulus-projects\my-experiment"
+Set-Location "$HOME\limulus-projects\my-experiment"
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install numpy pandas
+```
 
-`dag/routes.go` validates and enumerates paths. `runner/universe.go` manages Python
-processes, reuse, cancellation, and scheduling. `runner/kernel.py` is embedded in
-the Go binary and executes cells without serializing their state. The older
-`branch`, `namespace`, `storage`, and `executor` packages remain compatibility code;
-the HTTP execution path no longer calls them.
+Replace `numpy pandas` with the packages your workflow needs, or omit that command
+if you only use the Python standard library. Limulus automatically uses the
+`.venv` beside your saved `.lmg` file. You do not need to activate it in a shell.
 
-`GET /api/node/run?project_path=...&node_id=...&run_mode=...` streams SSE JSON.
-`node_id` is optional for `all` and `reset`. Events have `kind`, `route_id`,
-`node_id`, `source`, `text`, and `success` where relevant. Lifecycle events are
-`route_started`, `node_started`, `node_finished`, `route_finished`, and `completed`;
-output events use `log`. Clients must wait for `completed`, including after one
-route fails, and must not infer failures from user output text.
+In the browser:
 
-Run backend checks with `go test -race ./...`. Tests cover route enumeration,
-live classes/closures/port values, cell reruns, diamond isolation, concurrent
-execution, independent failures, and cancellation.
+1. Choose **New Graph**, then **Save As** and enter the full path to
+   `workflow.lmg` inside your project directory.
+2. Choose **New Node** to add cells and connect them into a graph.
+3. Use **Save As** to save the graph and create its Python scripts in `nodes/`.
+4. Edit those scripts in your usual text editor, then choose **Run all universes**.
 
-## Example
+**Open** accepts the local path to an existing `.lmg` file. Relative paths are
+resolved from the directory where you started the server. **Save As** copies the
+workflow's scripts alongside the graph when saving to a new location.
 
-Open `examples/universes/experiment.lmg` in the editor and choose Run all universes.
-The two routes share the setup and evaluation source files, but produce separate
-predictions (6 and 12). Select Evaluate and choose Run cell: each universe's
-evaluation counter increments without recreating its model or closure.
+To try the included example, open `examples/universes/experiment.lmg` from the
+extracted package directory. Choose **Run all universes**: the
+two routes produce separate predictions, 6 and 12. Select Evaluate and choose
+**Run cell** to increment each universe's evaluation counter without recreating
+its model.
+
+## Run workflows
+
+- **Run all universes** restarts every route and runs every cell. Routes run
+  concurrently.
+- **Run through node** restarts each route containing the selected cell and runs
+  that route up to and including the cell.
+- **Run cell** runs only the selected cell in each matching live runtime. Earlier
+  cells on the route must have succeeded first; root cells can start fresh runtimes.
+- **Reset runtimes** stops every runtime for the project and releases its memory.
+- **Stop** cancels the current execution.
+
+A standalone cell is one universe. A diamond `A → B → D`, `A → C → D` creates two:
+each runs its own copy of A and D, and D never merges B and C. Disabled edges do
+not participate. Cycles, dangling edges, and graphs with more than 128 routes
+are rejected.
+
+Within a universe, cells share ordinary Python variables, functions, classes, and
+live objects. Rerunning a cell does not automatically rerun later cells or erase
+old variables. Use **Run through node** or **Run all universes** for fresh state
+after changing upstream code. Existing port-based workflows can also pass values
+through `outputs['out']` and `inputs['in']`.
+
+A failed cell stops its route and discards that runtime's state; other routes
+continue. Runtime state is also cleared on restart, reset, cancellation, or server
+shutdown. Save graphs and Python scripts to keep your work; live Python state is
+not saved to disk.
+
+Universes have separate Python memory but share the project directory and other
+machine resources. Shared cells execute once per universe, so file writes also
+repeat. Use distinct output paths for separate experiments. Interactive Python
+input prompts are not supported.
+
+## Settings
+
+Set environment variables before starting Limulus:
+
+| Variable | Purpose |
+| --- | --- |
+| `LIMULUS_PORT` | HTTP port; defaults to `8080`. Use `0` to choose an available port. |
+| `LIMULUS_NO_BROWSER` | Set to `1` to prevent automatic browser opening. |
+| `LIMULUS_PYTHON` | Python executable name or full path; defaults to `python3`. A project `.venv` takes precedence. |
+| `LIMULUS_HOST` | Bind address; defaults to `127.0.0.1` for local access. |
+
+For example, on macOS/Linux, from the extracted package directory:
+
+```sh
+LIMULUS_PORT=8081 ./limulus
+LIMULUS_NO_BROWSER=1 ./limulus
+LIMULUS_PYTHON=/path/to/python3 ./limulus
+```
+
+In Windows PowerShell:
+
+```powershell
+$env:LIMULUS_PORT = "8081"
+$env:LIMULUS_NO_BROWSER = "1"
+.\limulus.exe
+```
+
+If the default port is in use, choose another port or set `LIMULUS_PORT=0` and use
+the URL printed at startup. If a cell cannot import a package, install it into the
+project's `.venv` or the interpreter selected with `LIMULUS_PYTHON`, then reset the
+runtimes and run again.
+
+## Development
+
+Contributors need Git, Go 1.26 or later, Node.js 24 with npm, and Python 3.
+Clone the server and client side by side, then build and run:
+
+```sh
+git clone https://github.com/LimulusGraph/server.git
+git clone https://github.com/LimulusGraph/client.git
+cd client
+npm ci
+npm run build
+cd ../server
+go run .
+```
+
+For frontend live reload, keep the server running and run `npm run dev` from
+`client` in another terminal. Open **http://localhost:3000**; API requests are
+proxied to the server on port 8080.
+
+Run backend tests with `go test ./...` from `server`. To build a standalone binary,
+run `npm run build` in `client`, then `go build -o bin/limulus .` in `server`
+(use `bin/limulus.exe` on Windows). Rebuild the server after frontend changes to
+include the updated editor. Set `LIMULUS_PYTHON` if Python is not available as
+`python3`.

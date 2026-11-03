@@ -51,7 +51,9 @@ func main() {
 		return
 	}
 	fmt.Printf("LIMULUS_LISTEN_ADDR=%s\n", listener.Addr())
-	fmt.Printf("Limulus: http://%s\n", listener.Addr())
+	url := browserURL(listener.Addr())
+	fmt.Printf("Limulus: %s\n", url)
+	go openBrowserWhenReady(ctx, url, launchBrowser)
 	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		log.Printf("Server failed: %v", err)
 	}

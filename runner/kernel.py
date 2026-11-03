@@ -13,7 +13,12 @@ import threading
 import traceback
 import types
 
-protocol = os.fdopen(3, "w", buffering=1)
+if os.name == "nt":
+    import msvcrt
+    protocol_fd = msvcrt.open_osfhandle(int(os.environ.pop("LIMULUS_PROTOCOL_HANDLE")), os.O_WRONLY)
+else:
+    protocol_fd = 3
+protocol = os.fdopen(protocol_fd, "w", buffering=1)
 lock = threading.Lock()
 current_script = None
 figure_hashes = weakref.WeakKeyDictionary()

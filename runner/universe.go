@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -63,17 +64,25 @@ func startKernel(dir string) (*kernel, error) {
 	if python == "" {
 		python = "python3"
 	}
-	localPython := filepath.Join(dir, ".venv", "bin", "python")
+	venvBin, pythonName := "bin", "python"
+	if runtime.GOOS == "windows" {
+		venvBin, pythonName = "Scripts", "python.exe"
+	}
+	localPython := filepath.Join(dir, ".venv", venvBin, pythonName)
 	if _, err := os.Stat(localPython); err == nil {
 		python = localPython
 	}
 	cmd := exec.Command(python, "-u", "-c", kernelSource)
 	if python == localPython {
-		cmd.Env = append(os.Environ(), "VIRTUAL_ENV="+filepath.Join(dir, ".venv"), "PATH="+filepath.Join(dir, ".venv", "bin")+string(os.PathListSeparator)+os.Getenv("PATH"), "PYTHONNOUSERSITE=1")
+		cmd.Env = append(os.Environ(), "VIRTUAL_ENV="+filepath.Join(dir, ".venv"), "PATH="+filepath.Join(dir, ".venv", venvBin)+string(os.PathListSeparator)+os.Getenv("PATH"), "PYTHONNOUSERSITE=1")
 	}
 	cmd.Dir = dir
 	configureKernelProcess(cmd)
-	cmd.ExtraFiles = []*os.File{writer}
+	if err := configureKernelProtocol(cmd, writer); err != nil {
+		reader.Close()
+		writer.Close()
+		return nil, err
+	}
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		reader.Close()
