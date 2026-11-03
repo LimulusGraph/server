@@ -1,63 +1,28 @@
-# Limulus
+# Limulus execution server
 
-Limulus is a local, browser-based editor for Python workflows. Connect cells into
-a graph, run independent experiments, and inspect their output in your browser.
-The server hosts the editor and runs your Python code on your machine.
+The Python execution backend for [Limulus](https://github.com/LimulusGraph).
+It validates graph paths, manages persistent Python universes, and streams
+execution events to the browser application and VS Code extension.
 
-Each complete path through a graph is an independent notebook, called a
-**universe**. Universes keep separate Python state, even when they share cells.
+For the visual editor, use the [combined clients repository](https://github.com/LimulusGraph/clients).
+Its standalone web app and VS Code extension include this backend and manage
+project-local Python environments.
 
-## Requirements
+## Headless backend
 
-- Python 3 and any Python packages your workflows use.
-- A web browser.
+This repository builds only the execution server. It never opens a browser,
+embeds frontend assets, or serves an editor. The API listens on
+**http://127.0.0.1:8080** by default; `/api/health` reports readiness.
 
-Python is not bundled with Limulus. Check that it is available before starting:
+GitHub Actions tests the backend on Linux, macOS, and Windows and produces
+`limulus-server-<os>-<arch>` archives for amd64 and arm64. Each archive contains
+`limulus` (`limulus.exe` on Windows), examples, build metadata, and a SHA-256
+checksum. Pushing a `v*` tag publishes these backend artifacts as a GitHub Release.
 
-```sh
-python3 --version
-```
-
-On Windows, use `py -3 --version`. If Python is missing, install Python 3 before
-continuing. The compiled app includes both the server and browser editor.
-No build tools are required.
-
-## Install and start
-
-Download the compiled archive for your operating system and processor:
-
-| System | Archive |
-| --- | --- |
-| macOS, Apple silicon | `limulus-darwin-arm64.tar.gz` |
-| macOS, Intel | `limulus-darwin-amd64.tar.gz` |
-| Linux, x64 | `limulus-linux-amd64.tar.gz` |
-| Linux, ARM64 | `limulus-linux-arm64.tar.gz` |
-| Windows, x64 | `limulus-windows-amd64.zip` |
-| Windows, ARM64 | `limulus-windows-arm64.zip` |
-
-Once you have the archive, extract it and run the executable. For example, on an
-Apple silicon Mac:
-
-```sh
-tar -xzf limulus-darwin-arm64.tar.gz
-cd limulus-darwin-arm64
-./limulus
-```
-
-On Linux, substitute the matching Linux archive and directory names. On Windows,
-run these commands in PowerShell from the directory containing the ZIP file:
-
-```powershell
-Expand-Archive .\limulus-windows-amd64.zip -DestinationPath .
-Set-Location .\limulus-windows-amd64
-$env:LIMULUS_PYTHON = py -3 -c "import sys; print(sys.executable)"
-.\limulus.exe
-```
-
-Limulus opens **http://127.0.0.1:8080** in your default browser when it is ready.
-Keep the terminal open while you work. Press **Ctrl+C** in that terminal to stop
-the server and its Python runtimes. If the browser does not open automatically,
-open the URL printed in the terminal.
+Standalone installers and VS Code extensions are built, tested, and released
+from [LimulusGraph/clients](https://github.com/LimulusGraph/clients). Choose a
+client installer for an interactive workspace; a server archive contains only
+the execution API.
 
 ## Set up a project
 
@@ -83,23 +48,9 @@ Replace `numpy pandas` with the packages your workflow needs, or omit that comma
 if you only use the Python standard library. Limulus automatically uses the
 `.venv` beside your saved `.lmg` file. You do not need to activate it in a shell.
 
-In the browser:
-
-1. Choose **New Graph**, then **Save As** and enter the full path to
-   `workflow.lmg` inside your project directory.
-2. Choose **New Node** to add cells and connect them into a graph.
-3. Use **Save As** to save the graph and create its Python scripts in `nodes/`.
-4. Edit those scripts in your usual text editor, then choose **Run all universes**.
-
-**Open** accepts the local path to an existing `.lmg` file. Relative paths are
-resolved from the directory where you started the server. **Save As** copies the
-workflow's scripts alongside the graph when saving to a new location.
-
-To try the included example, open `examples/universes/experiment.lmg` from the
-extracted package directory. Choose **Run all universes**: the
-two routes produce separate predictions, 6 and 12. Select Evaluate and choose
-**Run cell** to increment each universe's evaluation counter without recreating
-its model.
+Use the combined client to create or open a `.lmg` graph in this directory.
+The [sample universe project](examples/universes) contains two paths that share
+source files while keeping independent models and runtime state.
 
 ## Run workflows
 
@@ -140,15 +91,13 @@ Set environment variables before starting Limulus:
 | Variable | Purpose |
 | --- | --- |
 | `LIMULUS_PORT` | HTTP port; defaults to `8080`. Use `0` to choose an available port. |
-| `LIMULUS_NO_BROWSER` | Set to `1` to prevent automatic browser opening. |
-| `LIMULUS_PYTHON` | Python executable name or full path; defaults to `python3`. A project `.venv` takes precedence. |
+| `LIMULUS_PYTHON` | Python executable name or full path; defaults to `python` on Windows and `python3` elsewhere. A project `.venv` takes precedence. |
 | `LIMULUS_HOST` | Bind address; defaults to `127.0.0.1` for local access. |
 
 For example, on macOS/Linux, from the extracted package directory:
 
 ```sh
 LIMULUS_PORT=8081 ./limulus
-LIMULUS_NO_BROWSER=1 ./limulus
 LIMULUS_PYTHON=/path/to/python3 ./limulus
 ```
 
@@ -156,7 +105,6 @@ In Windows PowerShell:
 
 ```powershell
 $env:LIMULUS_PORT = "8081"
-$env:LIMULUS_NO_BROWSER = "1"
 .\limulus.exe
 ```
 
@@ -167,25 +115,15 @@ runtimes and run again.
 
 ## Development
 
-Contributors need Git, Go 1.26 or later, Node.js 24 with npm, and Python 3.
-Clone the server and client side by side, then build and run:
+Backend development requires Go 1.26+ and Python 3. No Node.js, npm, or clients
+checkout is needed:
 
 ```sh
-git clone https://github.com/LimulusGraph/server.git
-git clone https://github.com/LimulusGraph/client.git
-cd client
-npm ci
-npm run build
-cd ../server
-go run .
+go test ./...
+go build -o bin/limulus .
+python scripts/package.py --os linux  # Also accepts darwin or windows
 ```
 
-For frontend live reload, keep the server running and run `npm run dev` from
-`client` in another terminal. Open **http://localhost:3000**; API requests are
-proxied to the server on port 8080.
-
-Run backend tests with `go test ./...` from `server`. To build a standalone binary,
-run `npm run build` in `client`, then `go build -o bin/limulus .` in `server`
-(use `bin/limulus.exe` on Windows). Rebuild the server after frontend changes to
-include the updated editor. Set `LIMULUS_PYTHON` if Python is not available as
-`python3`.
+The server workflow builds only this repository. UI builds, installer validation,
+and client releases belong to the clients workflow, which resolves its backend
+revision once and reuses that exact commit across all native build jobs.

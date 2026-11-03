@@ -1,2 +1,2 @@
-The browser bundle is generated in dist/ by `npm run build` in ../../client.
-Build the frontend before compiling the Go server to embed the editor.
+Browser applications and installers live in https://github.com/LimulusGraph/clients.
+The server exposes only its execution API and does not embed or serve this directory.

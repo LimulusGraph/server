@@ -26,3 +26,6 @@ web/dist/
 
 # Distribution archives
 release/
+
+# Python script bytecode
+__pycache__/

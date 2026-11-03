@@ -63,6 +63,9 @@ func startKernel(dir string) (*kernel, error) {
 	python := os.Getenv("LIMULUS_PYTHON")
 	if python == "" {
 		python = "python3"
+		if runtime.GOOS == "windows" {
+			python = "python"
+		}
 	}
 	venvBin, pythonName := "bin", "python"
 	if runtime.GOOS == "windows" {
@@ -72,7 +75,7 @@ func startKernel(dir string) (*kernel, error) {
 	if _, err := os.Stat(localPython); err == nil {
 		python = localPython
 	}
-	cmd := exec.Command(python, "-u", "-c", kernelSource)
+	cmd := exec.Command(python, "-X", "utf8", "-u", "-c", kernelSource)
 	if python == localPython {
 		cmd.Env = append(os.Environ(), "VIRTUAL_ENV="+filepath.Join(dir, ".venv"), "PATH="+filepath.Join(dir, ".venv", venvBin)+string(os.PathListSeparator)+os.Getenv("PATH"), "PYTHONNOUSERSITE=1")
 	}

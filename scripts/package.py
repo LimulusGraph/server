@@ -1,4 +1,4 @@
-"""Build both CPU architectures and package the embedded editor with the server."""
+"""Build backend-only archives for both CPU architectures."""
 import argparse
 import hashlib
 import os
@@ -11,16 +11,11 @@ root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--os', required=True, choices=['darwin', 'linux', 'windows'])
 args = parser.parse_args()
-if not (root / 'web/dist/index.html').is_file():
-    parser.error('Build the client first: cd ../client && npm ci && npm run build')
 release = root / 'release'
 release.mkdir(exist_ok=True)
 server_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
-client_commit = os.environ.get('CLIENT_COMMIT')
-if not client_commit and (root.parent / 'client/.git').exists():
-    client_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root.parent / 'client', text=True).strip()
 for arch in ['amd64', 'arm64']:
-    name = f'limulus-{args.os}-{arch}'
+    name = f'limulus-server-{args.os}-{arch}'
     with tempfile.TemporaryDirectory() as temp:
         package = Path(temp) / name
         package.mkdir()
@@ -33,7 +28,7 @@ for arch in ['amd64', 'arm64']:
         for license_file in root.glob('LICENSE*'):
             shutil.copy2(license_file, package)
         (package / 'BUILD.txt').write_text(
-            f'Server: {server_commit}\nClient: {client_commit or "unknown (local bundle)"}\n'
+            f'Server: {server_commit}\nComponent: execution backend (no browser host)\n'
             f'Target: {args.os}/{arch}\n', encoding='utf-8')
         archive = Path(shutil.make_archive(str(release / name),
                        'zip' if args.os == 'windows' else 'gztar', temp, name))

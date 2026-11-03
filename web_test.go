@@ -1,46 +1,26 @@
 package main
 
 import (
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
-func TestWebAndAPIRoutes(t *testing.T) {
+func TestHeadlessRoutes(t *testing.T) {
 	t.Setenv("LIMULUS_TOKEN", "")
-	handler := newHandler()
-	for _, path := range []string{"/", "/api/health", "/api/missing", "/missing.js"} {
+	for _, route := range []struct {
+		path   string
+		status int
+	}{
+		{"/", http.StatusNotFound},
+		{"/assets/main.js", http.StatusNotFound},
+		{"/api/health", http.StatusOK},
+		{"/api/missing", http.StatusNotFound},
+	} {
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequest("GET", path, nil))
-		want := http.StatusOK
-		switch path {
-		case "/":
-			if _, err := fs.Stat(webFiles, "web/dist/index.html"); err != nil {
-				want = http.StatusServiceUnavailable
-			}
-		case "/api/missing":
-			want = http.StatusNotFound
-		case "/missing.js":
-			want = http.StatusNotFound
-			if _, err := fs.Stat(webFiles, "web/dist/index.html"); err != nil {
-				want = http.StatusServiceUnavailable
-			}
-		}
-		if response.Code != want {
-			t.Errorf("%s: got %d, want %d", path, response.Code, want)
-		}
-		if path == "/" && want == http.StatusOK && !strings.Contains(response.Body.String(), `id="root"`) {
-			t.Fatal("missing editor root")
-		}
-	}
-	entries, _ := fs.ReadDir(webFiles, "web/dist/assets")
-	for _, entry := range entries {
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequest("GET", "/assets/"+entry.Name(), nil))
-		if response.Code != http.StatusOK || response.Body.Len() == 0 {
-			t.Fatalf("asset %s not served", entry.Name())
+		newHandler().ServeHTTP(response, httptest.NewRequest("GET", route.path, nil))
+		if response.Code != route.status {
+			t.Errorf("%s: got %d, want %d", route.path, response.Code, route.status)
 		}
 	}
 }
