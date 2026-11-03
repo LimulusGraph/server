@@ -8,7 +8,31 @@ Disabled edges do not participate. Cycles and dangling edges are rejected.
 
 ## Running
 
-Install Go and Python 3, put `python3` on PATH, then run `go run .` in this directory.
+Install Go, Node.js (compatible with Vite 8), npm, and Python 3. Put `python3`
+on PATH. From this directory run:
+
+```sh
+make run
+```
+
+Open **http://127.0.0.1:8080**. The Go server hosts both the editor and its API;
+no native app or Rust toolchain is required. `make build` creates `bin/limulus`
+with the browser assets embedded, so the binary can run from any directory.
+Rebuild after frontend changes. Plain `go run .` uses the last built bundle;
+without a bundle, the API still works and the home page explains how to build it.
+
+The server binds to loopback by default. `LIMULUS_PORT` changes the port and
+`LIMULUS_HOST` overrides the bind address. Open and Save As ask for local `.lmg`
+paths; relative paths are resolved from the server's working directory. Save As
+copies the workflow's Python scripts alongside the graph. Edit scripts in your
+usual editor, then run them from the browser. Files remain on the local machine.
+
+For frontend development, start `go run .` here and `npm run dev` in `../client`.
+Open the Vite URL (port 3000); `/api` is proxied to the Go server. Set
+`LIMULUS_API_URL` when starting Vite to use a different backend address.
+Servers started with `LIMULUS_TOKEN` retain the extension's bearer authentication
+and do not expose the browser editor.
+
 No Python serialization package is required. Python packages used by cells must
 be installed in that interpreter's environment. Launch the server with the desired
 virtual environment on PATH.

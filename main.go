@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -30,19 +31,13 @@ func main() {
 		port = envPort
 	}
 
-	http.HandleFunc("/api/project/load", enableCORS(handleLoadProject))
-	http.HandleFunc("/api/project/save", enableCORS(handleSaveProject))
-	http.HandleFunc("/api/project/init_temp", enableCORS(handleInitTempProject))
-	http.HandleFunc("/api/project/ensure_scripts", enableCORS(handleEnsureScripts))
-	http.HandleFunc("/api/project/relocate", enableCORS(handleRelocateProject))
-	http.HandleFunc("/api/health", enableCORS(handleHealth))
-	http.HandleFunc("/api/node/read_code", enableCORS(handleReadCode))
-	http.HandleFunc("/api/node/save_code", enableCORS(handleSaveCode))
-	http.HandleFunc("/api/node/run", enableCORS(handleRunNode))
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	server := &http.Server{Addr: net.JoinHostPort(os.Getenv("LIMULUS_HOST"), port), BaseContext: func(net.Listener) context.Context { return ctx }}
+	host := os.Getenv("LIMULUS_HOST")
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	server := &http.Server{Handler: newHandler(), Addr: net.JoinHostPort(host, port), BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -56,9 +51,27 @@ func main() {
 		return
 	}
 	fmt.Printf("LIMULUS_LISTEN_ADDR=%s\n", listener.Addr())
+	fmt.Printf("Limulus: http://%s\n", listener.Addr())
 	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		log.Printf("Server failed: %v", err)
 	}
+}
+
+func newHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/project/load", enableCORS(handleLoadProject))
+	mux.HandleFunc("/api/project/save", enableCORS(handleSaveProject))
+	mux.HandleFunc("/api/project/init_temp", enableCORS(handleInitTempProject))
+	mux.HandleFunc("/api/project/ensure_scripts", enableCORS(handleEnsureScripts))
+	mux.HandleFunc("/api/project/relocate", enableCORS(handleRelocateProject))
+	mux.HandleFunc("/api/health", enableCORS(handleHealth))
+	mux.HandleFunc("/api/node/read_code", enableCORS(handleReadCode))
+	mux.HandleFunc("/api/node/save_code", enableCORS(handleSaveCode))
+	mux.HandleFunc("/api/node/run", enableCORS(handleRunNode))
+
+	mux.HandleFunc("/api/", http.NotFound)
+	mux.Handle("/", webHandler())
+	return mux
 }
 
 type RFWorkflow struct {
@@ -94,8 +107,8 @@ var nonWordRegexp = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 // CORS & Method Middleware
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// The desktop app keeps its existing local API. Managed extension servers
-		// require an unguessable token and do not grant browser CORS access.
+		// Managed extension servers retain bearer authentication. Browser requests
+		// must come from this server; the local API can write files and run Python.
 		token := os.Getenv("LIMULUS_TOKEN")
 		if token != "" {
 			expected := "Bearer " + token
@@ -104,7 +117,17 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			if origin := r.Header.Get("Origin"); origin != "" {
+				parsed, err := url.Parse(origin)
+				if err != nil || parsed.Host != r.Host || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+					http.Error(w, "Cross-origin request denied", http.StatusForbidden)
+					return
+				}
+			}
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				http.Error(w, "Cross-site request denied", http.StatusForbidden)
+				return
+			}
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
